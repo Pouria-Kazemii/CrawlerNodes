@@ -1,0 +1,15 @@
+services:
+  crawler-node-1:
+    build:
+      context: ./crawler-node
+      dockerfile: Dockerfile
+    container_name: crawler-node-1
+    ports:
+      - "5001:5000"
+    networks:
+      - crawler-network
+    restart: unless-stopped
+
+networks:
+  crawler-network:
+    driver: bridge
