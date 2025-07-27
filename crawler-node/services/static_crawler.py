@@ -1,8 +1,9 @@
 import asyncio
-from urllib.parse import urljoin
 from playwright.async_api import async_playwright
 from services.base_crawler import BaseCrawler
 from utils.sender import send_result_to_laravel
+from config import DEBUG_MODE
+
 
 class StaticCrawler(BaseCrawler):
     def crawl(self, config):
@@ -10,14 +11,36 @@ class StaticCrawler(BaseCrawler):
 
     async def _crawl_static(self, config):
         try:
-            base_url = config.get("base_url")
-            if not base_url:
-                return {"status": "error", "message": "Missing base_url"}
+            urls = config.get("urls")
+            meta = config.get("meta")
+
+            if not urls or not isinstance(urls, list):
+                send_result_to_laravel({
+                    "type": "static",
+                    "original_url": urls,
+                    "error": 'Missing or invalid urls (must be an array)',
+                    "meta": meta,
+                    "is_last": True,
+                    'status_code': 400
+                })
+                return '', 400
+
+            if not meta or not isinstance(meta, dict):
+                send_result_to_laravel({
+                    "type": "static",
+                    "original_url": urls,
+                    "error": 'Missing or invalid meta (must be an object)',
+                    "meta": meta,
+                    "is_last": True,
+                    'status_code': 400
+                })
+                return '', 400
 
             options = config.get("options", {})
+            delay = int(options.get("crawl_delay", 0))
             headers = options.get("headers", {})
+            selectors = options.get("selectors", [])  # Must be a list of dicts
 
-            # Add default User-Agent
             if "User-Agent" not in headers:
                 headers["User-Agent"] = (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -25,64 +48,76 @@ class StaticCrawler(BaseCrawler):
                     "Chrome/119.0.0.0 Safari/537.36"
                 )
 
-            # Build list of URLs
-            if config.get("start_urls"):
-                urls = [urljoin(base_url, path) for path in config["start_urls"]]
-            elif config.get("url_pattern") and config.get("range"):
-                pattern = config["url_pattern"]
-                start = config["range"].get("start", 1)
-                end = config["range"].get("end", 1)
-                urls = [pattern.replace("{id}", str(i)) for i in range(start, end + 1)]
-            else:
-                urls = [base_url]
-
-            if config.get("start_urls") and config.get("url_pattern"):
-                return {"status": "error", "message": "Cannot use both start_urls and url_pattern"}
-
-            results = []
-
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
+                browser = await p.chromium.launch(
+                    headless=not DEBUG_MODE,
+                    slow_mo=200 if DEBUG_MODE else 0
+                )
                 context = await browser.new_context(extra_http_headers=headers)
                 page = await context.new_page()
 
-                for url in urls:
+                for index, url in enumerate(urls):
                     try:
-                        print(f"Crawling: {url}")
-                        await page.goto(url, timeout=30000)
+                        await page.goto(url, timeout=15000)
                         await page.wait_for_load_state("networkidle")
-                        html = await page.content()
-                        final_url = page.url
+                        await asyncio.sleep(delay)
 
-                        result = {
+                        extracted_data = {}
+                        for selector_item in selectors:
+                            field = selector_item.get("key")
+                            selector = selector_item.get("selector")
+                            full_html = selector_item.get("full_html", False)
+
+                            if not field or not selector:
+                                continue
+
+                            try:
+                                elements = await page.query_selector_all(selector)
+                                field_contents = []
+
+                                for element in elements:
+                                    try:
+                                        if full_html:
+                                            content = await element.inner_html()
+                                        else:
+                                            raw_text = await element.text_content()
+                                            content = ' '.join([
+                                                t.strip() for t in raw_text.split('\n')
+                                                if t.strip() and t not in ('== %0', '⇔')
+                                            ]) if raw_text else None
+
+                                        if content:
+                                            field_contents.append(content.strip())
+
+                                    except Exception:
+                                        continue
+
+                                extracted_data[field] = field_contents
+
+                            except Exception:
+                                extracted_data[field] = []
+
+                        send_result_to_laravel({
                             "type": "static",
                             "original_url": url,
-                            "final_url": final_url,
-                            "html": html,
-                            "meta": config.get("meta", {})  # optional: job_id, user_id
-                        }
+                            "final_url": page.url,
+                            "content": extracted_data,
+                            "meta": meta,
+                            "is_last": index == len(urls) - 1,
+                            'status_code': 200
+                        })
 
-                        results.append(result)
-                        # send_result_to_laravel(result)
-
-                    except Exception as e:
-                        result = {
+                    except Exception as page_error:
+                        send_result_to_laravel({
                             "type": "static",
                             "original_url": url,
-                            "error": str(e),
-                            "meta": config.get("meta", {})
-                        }
-                        results.append(result)
-                        # send_result_to_laravel(result)
+                            "error": str(page_error),
+                            "meta": meta,
+                            "is_last": index == len(urls) - 1,
+                            'status_code': 500
+                        })
 
-                return {
-                    "status": "success",
-                    "base_url": base_url,
-                    "count": len(results)
-                }
+                await browser.close()
 
-        except Exception as e:
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        except Exception as main_error:
+            return {"status": "error", "message": str(main_error)}

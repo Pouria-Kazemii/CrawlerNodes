@@ -2,6 +2,7 @@ import asyncio
 from playwright.async_api import async_playwright
 from services.base_crawler import BaseCrawler
 from utils.sender import send_result_to_laravel
+from config import DEBUG_MODE
 
 class DynamicCrawler(BaseCrawler):
     def crawl(self, config):
@@ -9,72 +10,126 @@ class DynamicCrawler(BaseCrawler):
 
     async def _crawl_dynamic(self, config):
         try:
-            base_url = config.get("base_url")
-            start_url = config.get("start_url", base_url)
+            urls = config.get("urls")
+            if not urls or not isinstance(urls, list):
+                send_result_to_laravel({
+                    "type": "dynamic",
+                    "original_url": urls,
+                    "error": "Missing or invalid urls (must be an array)",
+                    "meta": config.get("meta"),
+                    "is_last": True,
+                    "status_code": 400
+                })
+                return '', 400
+
             options = config.get("options", {})
+            delay = int(options.get("crawl_delay", 5))
             headers = options.get("headers", {})
-
-            scroll = options.get("scroll", False)
-            scroll_steps = int(options.get("scroll_steps", 20))
-            scroll_delay = int(options.get("scroll_delay", 100))
-
-            click_selector = options.get("click_selector")
-            click_times = int(options.get("click_times", 0))
-
-            delay = int(options.get("crawl_delay", 1))
+            selectors = options.get("selectors", [])
+            max_scrolls = int(options.get("max_scrolls", 5))
 
             if "User-Agent" not in headers:
-                headers["User-Agent"] = "Mozilla/5.0 Chrome"
+                headers["User-Agent"] = (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/119.0.0.0 Safari/537.36"
+                )
 
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
+                browser = await p.chromium.launch(
+                    headless=not DEBUG_MODE,
+                    slow_mo=250 if DEBUG_MODE else 0
+                )
                 context = await browser.new_context(extra_http_headers=headers)
                 page = await context.new_page()
 
-                await page.goto(start_url, timeout=30000)
-                await page.wait_for_load_state("networkidle")
-                await asyncio.sleep(delay)
-
-                # click "load more" button if specified
-                for _ in range(click_times):
+                for index, url in enumerate(urls):
                     try:
-                        btn = await page.query_selector(click_selector)
-                        if not btn:
-                            break
-                        await asyncio.gather(
-                            page.wait_for_load_state("networkidle"),
-                            btn.click()
-                        )
-                        await asyncio.sleep(1)
-                    except Exception:
-                        break
+                        await page.goto(url, timeout=30000)
+                        await page.wait_for_load_state("networkidle")
+                        await asyncio.sleep(delay)
+                        scroll_step=300
+                       # Step 2: Detect correct scroll_step
+                        while True:
+                            previous_height = await page.evaluate("document.body.scrollHeight")
+                            
+                            await page.mouse.wheel(0, scroll_step)
+                            
+                            await asyncio.sleep(2)
+                            
+                            new_height = await page.evaluate("document.body.scrollHeight")
+                            
+                            if new_height <= previous_height:
+                                scroll_step += 100  # increase step to try more scroll next time
+                            else:
+                                # new content loaded!
+                                scroll_step = new_height - previous_height
+                                if scroll_step <= 0:
+                                    # safety fallback, in case new_height - previous_height is 0 or negative
+                                    scroll_step = 100
+                                break
 
-                # scroll to bottom
-                if scroll:
-                    await page.evaluate(f"""
-                        async () => {{
-                            const delay = {scroll_delay};
-                            const steps = {scroll_steps};
-                            for (let i = 0; i < steps; i++) {{
-                                window.scrollBy(0, window.innerHeight / 2);
-                                await new Promise(r => setTimeout(r, delay));
-                            }}
-                        }}
-                    """)
-                    await asyncio.sleep(1)
+                        # Step 3: Scroll for max_scrolls times with working scroll_step
+                        for i in range(max_scrolls-1):
+                            scroll_step += 140
+                            await page.mouse.wheel(0, scroll_step/2)
+                            await asyncio.sleep(2)
+                            await page.mouse.wheel(0, scroll_step/2)
+                            await asyncio.sleep(6)
 
-                html = await page.content()
-                send_result_to_laravel({
-                    "type": "dynamic",
-                    "original_url": start_url,
-                    "final_url": page.url,
-                    "html": html,
-                    "meta": config.get("meta", {})
-                })
+
+                        # === Extract Content ===
+                        extracted_data = {}
+                        for selector_item in selectors:
+                            field = selector_item.get("key")
+                            selector = selector_item.get("selector")
+                            full_html = selector_item.get("full_html", False)
+                            if not field or not selector:
+                                continue
+
+                            try:
+                                elements = await page.query_selector_all(selector)
+                                field_contents = []
+                                for el in elements:
+                                    try:
+                                        if full_html:
+                                            content = await el.inner_html()
+                                        else:
+                                            text = await el.text_content()
+                                            content = ' '.join([
+                                                t.strip() for t in text.split('\n')
+                                                if t.strip() and t not in ('== %0', '⇔')
+                                            ]) if text else None
+                                        if content:
+                                            field_contents.append(content.strip())
+                                    except:
+                                        continue
+                                extracted_data[field] = field_contents
+                            except:
+                                extracted_data[field] = []
+
+                        result = {
+                            "type": "dynamic",
+                            "original_url": url,
+                            "final_url": page.url,
+                            "content": extracted_data,
+                            "meta": config.get("meta"),
+                            "is_last": index == len(urls) - 1,
+                            "status_code": 200
+                        }
+                        send_result_to_laravel(result)
+
+                    except Exception as page_error:
+                        send_result_to_laravel({
+                            "type": "dynamic",
+                            "original_url": url,
+                            "error": str(page_error),
+                            "meta": config.get("meta"),
+                            "is_last": index == len(urls) - 1,
+                            "status_code": 500
+                        })
 
                 await browser.close()
-
-            return {"status": "success", "base_url": base_url}
 
         except Exception as e:
             return {"status": "error", "message": str(e)}

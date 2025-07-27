@@ -7,7 +7,7 @@ def send_result_to_laravel(payload):
             "Authorization": f"Bearer {LARAVEL_API_TOKEN}",
             "Content-Type": "application/json"
         }
-        response = requests.post(LARAVEL_API_URL, json=payload, headers=headers, timeout=10)
+        response = requests.post(LARAVEL_API_URL, json=payload, headers=headers, timeout=20)
         response.raise_for_status()
         return True
     except Exception as e:
