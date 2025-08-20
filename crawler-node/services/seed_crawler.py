@@ -13,38 +13,33 @@ class SeedCrawler(BaseCrawler):
         try:
             urls = config.get("urls")
             meta = config.get("meta")
-            
+
             if not urls or not isinstance(urls, list):
-                result = {
+                send_result_to_laravel({
                     "type": "seed",
                     "original_url": urls,
-                    "error": 'Missing or invalid urls (must be an array)',
-                    "meta": config.get("meta") ,
+                    "error": "Missing or invalid urls (must be an array)",
+                    "meta": meta,
                     "is_last": True,
-                    'status_code' : 400
-                }
-                send_result_to_laravel(result)
-                return '',400
-            
-            if not meta or not isinstance(urls, list):
-                result = {
+                    "status_code": 400
+                })
+                return '', 400
+
+            if not meta:
+                send_result_to_laravel({
                     "type": "seed",
                     "original_url": urls,
-                    "error": 'Missing or invalid meta (must be an array)',
-                    "meta": config.get("meta"),
-                    "is_last": True ,
-                    'status_code' : 400
-                }
-                send_result_to_laravel(result)
-                return '', 400   
+                    "error": "Missing meta",
+                    "meta": meta,
+                    "is_last": True,
+                    "status_code": 400
+                })
+                return '', 400
 
             options = config.get("options", {})
             delay = int(options.get("crawl_delay", 1))
-            max_depth = int(options.get("max_depth", 1))
             headers = options.get("headers", {})
             selector = options.get("selector")
-
-            # You provide this directly as a list of path substrings
             include_patterns = options.get("link_filter_rules", [])
 
             if "User-Agent" not in headers:
@@ -54,9 +49,6 @@ class SeedCrawler(BaseCrawler):
                     "Chrome/119.0.0.0 Safari/537.36"
                 )
 
-            visited = set()
-            queue = [(url, 0) for url in urls]
-
             async with async_playwright() as p:
                 browser = await p.chromium.launch(
                     headless=not DEBUG_MODE,
@@ -65,21 +57,14 @@ class SeedCrawler(BaseCrawler):
                 context = await browser.new_context(extra_http_headers=headers)
                 page = await context.new_page()
 
-                while queue:
-                    current_url, depth = queue.pop(0)
-                    if current_url in visited or depth > max_depth:
-                        continue
 
-                    visited.add(current_url)
-                    is_last = len(queue) == 0
-
+                for index, url in enumerate(urls):
                     try:
-                        await page.goto(current_url, timeout=10000)
+                        await page.goto(url, timeout=15000)
                         await page.wait_for_load_state("networkidle")
                         await asyncio.sleep(delay)
-
-                        # Extract all links on the page
-                        if selector != 'null':
+                        
+                        if selector and selector != 'null':
                             links = await page.eval_on_selector_all(
                                 f"{selector} a[href]",
                                 "elements => elements.map(e => e.href)"
@@ -88,36 +73,28 @@ class SeedCrawler(BaseCrawler):
                             links = await page.eval_on_selector_all(
                                 "a[href]",
                                 "elements => elements.map(e => e.href)"
-                            )
-
-                        # Filter links
+                            )    
+                            
                         matched_links = self._apply_filters(links, include_patterns)
-
-                        # Send only filtered result (NO HTML)
-                        result = {
+                            
+                        send_result_to_laravel({
                             "type": "seed",
-                            "original_url": current_url,
+                            "original_url": url,
                             "final_url": page.url,
                             "content": matched_links,
-                            "meta": config.get("meta") ,
-                            "is_last": is_last,
-                            'status_code': 200
-                        }
-                        send_result_to_laravel(result)
-
-                        # Add filtered links to queue for further crawling
-                        for link in matched_links:
-                            if link not in visited:
-                                queue.append((link, depth + 1))
+                            "meta": meta,
+                            "is_last": index == len(urls) - 1,
+                            "status_code": 200
+                        })
 
                     except Exception as e:
                         send_result_to_laravel({
                             "type": "seed",
-                            "original_url": current_url,
+                            "original_url": url,
                             "error": str(e),
-                            "meta": meta ,
-                            "is_last": is_last,
-                            'status_code':500
+                            "meta": meta,
+                            "is_last": index == len(urls) - 1,
+                            "status_code": 500
                         })
 
                 await browser.close()
@@ -126,16 +103,6 @@ class SeedCrawler(BaseCrawler):
             return {"status": "error", "message": str(e)}
 
     def _apply_filters(self, links, include_substrings):
-        """
-        Return only links that contain at least one of the given substrings
-        Example: include_substrings = ['/fa/news', '/fa/zxc']
-        Will match: https://site.com/abc/fa/zxc/123
-        """
         if not include_substrings:
-            return links  # No filtering needed
-
-        filtered = []
-        for link in links:
-            if any(sub in link for sub in include_substrings):
-                filtered.append(link)
-        return filtered
+            return links
+        return [link for link in links if any(sub in link for sub in include_substrings)]
