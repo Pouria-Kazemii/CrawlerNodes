@@ -9,6 +9,8 @@ services:
     networks:
       - crawler-network
     restart: unless-stopped
+    volumes:
+      - ./crawler-node:/app
 
 networks:
   crawler-network:

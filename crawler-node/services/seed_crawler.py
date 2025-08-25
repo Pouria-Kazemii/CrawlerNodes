@@ -1,91 +1,108 @@
 import asyncio
-import time
-import re
-from urllib.parse import urljoin, urlparse
 from playwright.async_api import async_playwright
 from services.base_crawler import BaseCrawler
+from utils.sender import send_result_to_laravel
+from config import DEBUG_MODE
+
 
 class SeedCrawler(BaseCrawler):
-    def crawl(self, url, options=None):
-        return asyncio.run(self._crawl_seed(url, options or {}))
+    def crawl(self, config):
+        return asyncio.run(self._crawl_seed(config))
 
-    async def _crawl_seed(self, start_url, options):
+    async def _crawl_seed(self, config):
         try:
-            limit = int(options.get("limit", 50))
-            max_depth = int(options.get("max_depth", 1))
+            urls = config.get("urls")
+            meta = config.get("meta")
+
+            if not urls or not isinstance(urls, list):
+                send_result_to_laravel({
+                    "type": "seed",
+                    "original_url": urls,
+                    "error": "Missing or invalid urls (must be an array)",
+                    "meta": meta,
+                    "is_last": True,
+                    "status_code": 400
+                })
+                return '', 400
+
+            if not meta:
+                send_result_to_laravel({
+                    "type": "seed",
+                    "original_url": urls,
+                    "error": "Missing meta",
+                    "meta": meta,
+                    "is_last": True,
+                    "status_code": 400
+                })
+                return '', 400
+
+            options = config.get("options", {})
             delay = int(options.get("crawl_delay", 1))
             headers = options.get("headers", {})
+            selector = options.get("selector")
+            include_patterns = options.get("link_filter_rules", [])
 
-            filter_rules = options.get("link_filter_rules", {})
-            include_patterns = filter_rules.get("include", [])
-            exclude_patterns = filter_rules.get("exclude", [])
-
-            collected = []
-            visited = set()
-            queue = [(start_url, 0)]
+            if "User-Agent" not in headers:
+                headers["User-Agent"] = (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/119.0.0.0 Safari/537.36"
+                )
 
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
+                browser = await p.chromium.launch(
+                    headless=not DEBUG_MODE,
+                    slow_mo=200 if DEBUG_MODE else 0
+                )
                 context = await browser.new_context(extra_http_headers=headers)
                 page = await context.new_page()
 
-                while queue and len(collected) < limit:
-                    current_url, depth = queue.pop(0)
 
-                    if current_url in visited or depth > max_depth:
-                        continue
-
-                    visited.add(current_url)
-
+                for index, url in enumerate(urls):
                     try:
-                        await page.goto(current_url, timeout=15000)
+                        await page.goto(url, timeout=15000)
                         await page.wait_for_load_state("networkidle")
-
-                        links = await page.eval_on_selector_all(
-                            "a[href^='http']",
-                            "elements => elements.map(e => e.href)"
-                        )
-
-                        # Filter links
-                        filtered_links = self._apply_filters(links, include_patterns, exclude_patterns)
-
-                        for link in filtered_links:
-                            if link not in visited:
-                                queue.append((link, depth + 1))
-                                collected.append(link)
-                                if len(collected) >= limit:
-                                    break
-
                         await asyncio.sleep(delay)
+                        
+                        if selector and selector != 'null':
+                            links = await page.eval_on_selector_all(
+                                f"{selector} a[href]",
+                                "elements => elements.map(e => e.href)"
+                            )
+                        else:
+                            links = await page.eval_on_selector_all(
+                                "a[href]",
+                                "elements => elements.map(e => e.href)"
+                            )    
+                            
+                        matched_links = self._apply_filters(links, include_patterns)
+                            
+                        send_result_to_laravel({
+                            "type": "seed",
+                            "original_url": url,
+                            "final_url": page.url,
+                            "content": matched_links,
+                            "meta": meta,
+                            "is_last": index == len(urls) - 1,
+                            "status_code": 200
+                        })
 
                     except Exception as e:
-                        # Skip broken pages silently or log
-                        continue
+                        send_result_to_laravel({
+                            "type": "seed",
+                            "original_url": url,
+                            "error": str(e),
+                            "meta": meta,
+                            "is_last": index == len(urls) - 1,
+                            "status_code": 500
+                        })
 
                 await browser.close()
 
-                return {
-                    "status": "success",
-                    "url": start_url,
-                    "links": collected[:limit],
-                    "count": len(collected[:limit])
-                }
-
         except Exception as e:
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+            return {"status": "error", "message": str(e)}
 
-    def _apply_filters(self, links, include_patterns, exclude_patterns):
-        def match_any(patterns, text):
-            return any(re.search(pattern, text) for pattern in patterns)
-
-        result = []
-        for link in links:
-            if include_patterns and not match_any(include_patterns, link):
-                continue
-            if exclude_patterns and match_any(exclude_patterns, link):
-                continue
-            result.append(link)
-        return result
+    def _apply_filters(self, links, include_substrings):
+        if not include_substrings:
+            return links
+        return [link for link in links if any(sub in link for sub in include_substrings)]
