@@ -1,0 +1,12 @@
+{
+  "comment": "Playwright seccomp profile for Chromium",
+  "names": [
+    "process_vm_readv",
+    "process_vm_writev",
+    "syslog"
+  ],
+  "action": "SCMP_ACT_ALLOW",
+  "args": null,
+  "includes": {},
+  "excludes": {}
+}

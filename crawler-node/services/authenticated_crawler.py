@@ -32,6 +32,8 @@ class AuthenticatedCrawler(BaseCrawler):
             credentials = auth.get("credentials", {})
             username = credentials.get("username")
             password = credentials.get("password")
+            meta = config.get("meta")
+
 
             if not (login_url and username and password and login_selector and password_selector):
                 result = {
@@ -42,7 +44,18 @@ class AuthenticatedCrawler(BaseCrawler):
                 }
                 send_result_to_laravel(result)
                 return '', 400
-
+            
+            if not meta:
+                send_result_to_laravel({
+                    "type": "seed",
+                    "original_url": urls,
+                    "error": "Missing meta",
+                    "meta": meta,
+                    "is_last": True,
+                    "status_code": 400
+                })
+                return '', 400
+            
             options = config.get("options", {})
             delay = int(options.get("crawl_delay", 1))
             headers = options.get("headers", {})
@@ -58,11 +71,21 @@ class AuthenticatedCrawler(BaseCrawler):
 
             async with async_playwright() as p:
                 browser = await p.chromium.launch(
-                    headless=not DEBUG_MODE,
-                    slow_mo=200 if DEBUG_MODE else 0
+                    headless=True,  # Always headless in Docker
+                    args=[
+                        '--disable-dev-shm-usage',  # Prevents /dev/shm issues
+                        '--no-sandbox',            # Required for Docker
+                        '--disable-setuid-sandbox', # Required for Docker
+                        '--disable-accelerated-2d-canvas',
+                        '--disable-gpu'
+                    ]
                 )
+               
                 context = await browser.new_context(extra_http_headers=headers)
+                # Set longer timeouts for Docker environment
+                context.set_default_timeout(30000)
                 page = await context.new_page()
+                page.set_default_timeout(30000)
 
                 try:
                     # Go to login page and perform login
@@ -76,9 +99,22 @@ class AuthenticatedCrawler(BaseCrawler):
                     # Crawl target pages after login
                     for index, url in enumerate(urls):
                         try:
-                            await page.goto(url, timeout=30000)
-                            await page.wait_for_load_state("networkidle")
-                            await asyncio.sleep(delay)
+                            # Enhanced navigation with better error handling
+                            try:
+                                await page.goto(url, timeout=15000, wait_until='domcontentloaded')
+                                await page.wait_for_load_state("networkidle", timeout=10000)
+                                await asyncio.sleep(delay)
+                            except Exception as nav_error:
+                                send_result_to_laravel({
+                                    "type": "seed",
+                                    "original_url": url,
+                                    "error": f"Navigation failed: {str(nav_error)}",
+                                    "meta": meta,
+                                    "is_last": index == len(urls) - 1,
+                                    "status_code": 500
+                                })
+                                continue  # Continue with next URL
+                            
 
                             extracted_data = {}
                             for selector_item in selectors:
@@ -146,6 +182,14 @@ class AuthenticatedCrawler(BaseCrawler):
                     send_result_to_laravel(error_result)             
 
                 await browser.close()
-
+                       
         except Exception as e:
-            return {"status": "error", "message": str(e)}
+            send_result_to_laravel({
+                "type": "seed",
+                "original_url": urls[0] if urls else '',
+                "error": f"Unhandled error: {str(e)}",
+                "meta": meta,
+                "is_last": True,
+                "status_code": 500
+            })
+            return {"status": "error", "message": str(e)}        

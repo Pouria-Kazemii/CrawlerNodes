@@ -36,47 +36,85 @@ class DynamicCrawler(BaseCrawler):
                 )
 
             async with async_playwright() as p:
+                # DOCKER-OPTIMIZED BROWSER LAUNCH
                 browser = await p.chromium.launch(
-                    headless=not DEBUG_MODE,
-                    slow_mo=250 if DEBUG_MODE else 0
+                    headless=True,  # Always headless in Docker
+                    args=[
+                        '--disable-dev-shm-usage',  # Prevents /dev/shm issues
+                        '--no-sandbox',            # Required for Docker
+                        '--disable-setuid-sandbox', # Required for Docker
+                        '--disable-accelerated-2d-canvas',
+                        '--disable-gpu'
+                    ]
                 )
+                
                 context = await browser.new_context(extra_http_headers=headers)
+                # Set longer timeouts for Docker environment
+                context.set_default_timeout(45000)
                 page = await context.new_page()
+                page.set_default_timeout(45000)
 
                 for index, url in enumerate(urls):
                     try:
-                        await page.goto(url, timeout=30000)
-                        await page.wait_for_load_state("networkidle")
-                        await asyncio.sleep(delay)
-                        scroll_step=300
-                       # Step 2: Detect correct scroll_step
-                        while True:
-                            previous_height = await page.evaluate("document.body.scrollHeight")
-                            
-                            await page.mouse.wheel(0, scroll_step)
-                            
-                            await asyncio.sleep(2)
-                            
-                            new_height = await page.evaluate("document.body.scrollHeight")
-                            
-                            if new_height <= previous_height:
-                                scroll_step += 100  # increase step to try more scroll next time
-                            else:
-                                # new content loaded!
-                                scroll_step = new_height - previous_height
-                                if scroll_step <= 0:
-                                    # safety fallback, in case new_height - previous_height is 0 or negative
-                                    scroll_step = 100
-                                break
+                        # Enhanced navigation with better error handling
+                        try:
+                            await page.goto(url, timeout=30000, wait_until='domcontentloaded')
+                            await page.wait_for_load_state("networkidle", timeout=15000)
+                            await asyncio.sleep(delay)
+                        except Exception as nav_error:
+                            send_result_to_laravel({
+                                "type": "dynamic",
+                                "original_url": url,
+                                "error": f"Navigation failed: {str(nav_error)}",
+                                "meta": config.get("meta"),
+                                "is_last": index == len(urls) - 1,
+                                "status_code": 500
+                            })
+                            continue  # Continue with next URL
+
+                        scroll_step = 300
+                        # Step 2: Detect correct scroll_step
+                        try:
+                            while True:
+                                previous_height = await page.evaluate("document.body.scrollHeight")
+                                
+                                await page.mouse.wheel(0, scroll_step)
+                                
+                                await asyncio.sleep(2)
+                                
+                                new_height = await page.evaluate("document.body.scrollHeight")
+                                
+                                if new_height <= previous_height:
+                                    scroll_step += 100  # increase step to try more scroll next time
+                                else:
+                                    # new content loaded!
+                                    scroll_step = new_height - previous_height
+                                    if scroll_step <= 0:
+                                        # safety fallback, in case new_height - previous_height is 0 or negative
+                                        scroll_step = 100
+                                    break
+                        except Exception as scroll_error:
+                            send_result_to_laravel({
+                                "type": "dynamic",
+                                "original_url": url,
+                                "error": f"Scroll detection failed: {str(scroll_error)}",
+                                "meta": config.get("meta"),
+                                "is_last": index == len(urls) - 1,
+                                "status_code": 500
+                            })
+                            continue  # Continue with next URL
 
                         # Step 3: Scroll for max_scrolls times with working scroll_step
-                        for i in range(max_scrolls-1):
-                            scroll_step += 140
-                            await page.mouse.wheel(0, scroll_step/2)
-                            await asyncio.sleep(2)
-                            await page.mouse.wheel(0, scroll_step/2)
-                            await asyncio.sleep(6)
-
+                        try:
+                            for i in range(max_scrolls-1):
+                                scroll_step += 140
+                                await page.mouse.wheel(0, scroll_step/2)
+                                await asyncio.sleep(2)
+                                await page.mouse.wheel(0, scroll_step/2)
+                                await asyncio.sleep(6)
+                        except Exception as scroll_error:
+                            # Continue even if scrolling fails partially
+                            pass
 
                         # === Extract Content ===
                         extracted_data = {}
@@ -132,4 +170,12 @@ class DynamicCrawler(BaseCrawler):
                 await browser.close()
 
         except Exception as e:
+            send_result_to_laravel({
+                "type": "dynamic",
+                "original_url": urls[0] if urls else '',
+                "error": f"Unhandled error: {str(e)}",
+                "meta": config.get("meta"),
+                "is_last": True,
+                "status_code": 500
+            })
             return {"status": "error", "message": str(e)}

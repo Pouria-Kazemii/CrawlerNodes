@@ -3,6 +3,7 @@ from playwright.async_api import async_playwright
 from services.base_crawler import BaseCrawler
 from utils.sender import send_result_to_laravel
 from config import DEBUG_MODE
+from urllib.parse import urljoin
 
 
 class PaginatedCrawler(BaseCrawler):
@@ -43,7 +44,6 @@ class PaginatedCrawler(BaseCrawler):
             headers = options.get("headers", {})
             selectors = options.get("selectors", [])  # Ensure this is a list
 
-
             if "User-Agent" not in headers:
                 headers["User-Agent"] = (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -54,20 +54,44 @@ class PaginatedCrawler(BaseCrawler):
             count = 0
 
             async with async_playwright() as p:
+                # DOCKER-OPTIMIZED BROWSER LAUNCH
                 browser = await p.chromium.launch(
-                    headless=not DEBUG_MODE,
-                    slow_mo=200 if DEBUG_MODE else 0
+                    headless=True,  # Always headless in Docker
+                    args=[
+                        '--disable-dev-shm-usage',  # Prevents /dev/shm issues
+                        '--no-sandbox',            # Required for Docker
+                        '--disable-setuid-sandbox', # Required for Docker
+                        '--disable-accelerated-2d-canvas',
+                        '--disable-gpu'
+                    ]
                 )
+                
                 context = await browser.new_context(extra_http_headers=headers)
+                # Set longer timeouts for Docker environment
+                context.set_default_timeout(30000)
                 page = await context.new_page()
+                page.set_default_timeout(30000)
 
                 for index, url in enumerate(urls):
                     current_url = url
                     while current_url and count < limit:
                         try:
-                            await page.goto(current_url, timeout=15000)
-                            await page.wait_for_load_state("networkidle")
-                            await asyncio.sleep(delay)
+                            # Enhanced navigation with better error handling
+                            try:
+                                await page.goto(current_url, timeout=15000, wait_until='domcontentloaded')
+                                await page.wait_for_load_state("networkidle", timeout=10000)
+                                await asyncio.sleep(delay)
+                            except Exception as nav_error:
+                                error_result = {
+                                    "type": "paginated",
+                                    "original_url": current_url,
+                                    "error": f"Navigation failed: {str(nav_error)}",
+                                    "meta": config.get("meta"),
+                                    "is_last": index == len(urls) - 1 and count >= limit - 1,
+                                    'status_code': 500
+                                }
+                                send_result_to_laravel(error_result)
+                                break  # Break out of while loop for this URL
 
                             extracted_data = {}
                             for selector_item in selectors:
@@ -101,49 +125,76 @@ class PaginatedCrawler(BaseCrawler):
                                 except Exception:
                                     extracted_data[field] = []
 
-
                             result = {
                                 "type": "paginated",
                                 "original_url": url,
                                 "final_url": page.url,
                                 "content": extracted_data,
                                 "meta": config.get("meta"),
-                                "is_last": index == len(urls) - 1,
+                                "is_last": index == len(urls) - 1 and count >= limit - 1,
                                 'status_code': 200
                             }
                         
                             send_result_to_laravel(result)
                             count += 1
 
-                            next_btn = await page.query_selector(next_selector)
-                            if next_btn:
+                            # Handle next page navigation
+                            try:
+                                next_btn = await page.query_selector(next_selector)
+                                if next_btn:
                                     try:
-                                        await asyncio.gather(
-                                            page.wait_for_navigation(),
-                                            next_btn.click()
+                                        # Wait for navigation with timeout
+                                        await asyncio.wait_for(
+                                            asyncio.gather(
+                                                page.wait_for_navigation(timeout=10000),
+                                                next_btn.click()
+                                            ),
+                                            timeout=15000
                                         )
                                         current_url = page.url
                                     except Exception:
+                                        # Fallback to href attribute
                                         href = await next_btn.get_attribute("href")
                                         if href:
-                                            from urllib.parse import urljoin
                                             current_url = urljoin(page.url, href)
                                         else:
-                                            break
-                                    else:
-                                        break
-                        except Exception as page_error:  # Renamed to avoid confusion
+                                            break  # No href, break pagination
+                                else:
+                                    break  # No next button found
+                            except Exception as nav_error:
+                                error_result = {
+                                    "type": "paginated",
+                                    "original_url": current_url,
+                                    "error": f"Next page navigation failed: {str(nav_error)}",
+                                    "meta": config.get("meta"),
+                                    "is_last": index == len(urls) - 1 and count >= limit - 1,
+                                    'status_code': 500
+                                }
+                                send_result_to_laravel(error_result)
+                                break
+
+                        except Exception as page_error:
                             error_result = {
-                            "type": "paginated",
-                            "original_url": url,
-                            "error": str(page_error),
-                            "meta": config.get("meta"),
-                            "is_last": index == len(urls) - 1,
-                            'status_code': 500
+                                "type": "paginated",
+                                "original_url": current_url,
+                                "error": str(page_error),
+                                "meta": config.get("meta"),
+                                "is_last": index == len(urls) - 1 and count >= limit - 1,
+                                'status_code': 500
                             }
                             send_result_to_laravel(error_result)
+                            break  # Break out of while loop for this URL
 
                 await browser.close()
 
         except Exception as e:
+            error_result = {
+                "type": "paginated",
+                "original_url": urls[0] if urls else '',
+                "error": f"Unhandled error: {str(e)}",
+                "meta": config.get("meta"),
+                "is_last": True,
+                'status_code': 500
+            }
+            send_result_to_laravel(error_result)
             return {"status": "error", "message": str(e)}

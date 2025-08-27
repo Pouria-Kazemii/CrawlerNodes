@@ -49,18 +49,41 @@ class StaticCrawler(BaseCrawler):
                 )
 
             async with async_playwright() as p:
+                # DOCKER-OPTIMIZED BROWSER LAUNCH
                 browser = await p.chromium.launch(
-                    headless=not DEBUG_MODE,
-                    slow_mo=200 if DEBUG_MODE else 0
+                    headless=True,  # Always headless in Docker
+                    args=[
+                        '--disable-dev-shm-usage',  # Prevents /dev/shm issues
+                        '--no-sandbox',            # Required for Docker
+                        '--disable-setuid-sandbox', # Required for Docker
+                        '--disable-accelerated-2d-canvas',
+                        '--disable-gpu'
+                    ]
                 )
+                
                 context = await browser.new_context(extra_http_headers=headers)
+                # Set longer timeouts for Docker environment
+                context.set_default_timeout(30000)
                 page = await context.new_page()
+                page.set_default_timeout(30000)
 
                 for index, url in enumerate(urls):
                     try:
-                        await page.goto(url, timeout=15000)
-                        await page.wait_for_load_state("networkidle")
-                        await asyncio.sleep(delay)
+                        # Enhanced navigation with better error handling
+                        try:
+                            await page.goto(url, timeout=15000, wait_until='domcontentloaded')
+                            await page.wait_for_load_state("networkidle", timeout=10000)
+                            await asyncio.sleep(delay)
+                        except Exception as nav_error:
+                            send_result_to_laravel({
+                                "type": "static",
+                                "original_url": url,
+                                "error": f"Navigation failed: {str(nav_error)}",
+                                "meta": meta,
+                                "is_last": index == len(urls) - 1,
+                                'status_code': 500
+                            })
+                            continue  # Continue with next URL
 
                         extracted_data = {}
                         for selector_item in selectors:
@@ -120,4 +143,12 @@ class StaticCrawler(BaseCrawler):
                 await browser.close()
 
         except Exception as main_error:
+            send_result_to_laravel({
+                "type": "static",
+                "original_url": urls[0] if urls else '',
+                "error": f"Unhandled error: {str(main_error)}",
+                "meta": meta,
+                "is_last": True,
+                'status_code': 500
+            })
             return {"status": "error", "message": str(main_error)}

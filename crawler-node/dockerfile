@@ -1,41 +1,30 @@
-# Use an official Python image
-FROM python:3.11-slim
+# Use the official Playwright Python image
+FROM mcr.microsoft.com/playwright/python:v1.44.0-jammy
 
+# Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
+# Set working directory
 WORKDIR /app
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y \
-    curl \
-    wget \
-    gnupg \
-    libglib2.0-0 \
-    libnss3 \
-    libgconf-2-4 \
-    libfontconfig1 \
-    libxss1 \
-    libasound2 \
-    libxtst6 \
-    libxrandr2 \
-    libgtk-3-0 \
-    libxdamage1 \
-    libxcomposite1 \
-    libxext6 \
-    libx11-xcb1 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install dependencies
+# Install Python dependencies
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
-
-# Install Playwright + dependencies
-RUN pip install playwright && playwright install --with-deps
 
 # Copy app code
 COPY . .
 
+# Create a non-root user and switch to it (for security)
+RUN useradd -m -u 1000 playwrightuser && \
+    chown -R playwrightuser:playwrightuser /app
+
+# Switch to non-root user
+USER playwrightuser
+
+# Expose the port
 EXPOSE 5000
 
+# Run the application (your existing main.py)
 CMD ["python", "main.py"]
