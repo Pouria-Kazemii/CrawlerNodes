@@ -15,7 +15,7 @@ services:
       - ./crawler-node:/app
     # Playwright-specific configurations
     security_opt:
-      - seccomp=./seccomp_profile.json
+      - seccomp=./crawler-node/seccomp_profile.json
     ipc: host  # Recommended for Chromium
     # Environment variables
     environment:

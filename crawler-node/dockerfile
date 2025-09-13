@@ -17,7 +17,7 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 COPY . .
 
 # Create a non-root user and switch to it (for security)
-RUN useradd -m -u 1000 playwrightuser && \
+RUN useradd -m -u 1300 playwrightuser && \
     chown -R playwrightuser:playwrightuser /app
 
 # Switch to non-root user
