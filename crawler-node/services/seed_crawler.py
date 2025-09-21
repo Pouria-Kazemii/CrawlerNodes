@@ -98,12 +98,13 @@ class SeedCrawler(BaseCrawler):
                             )    
                             
                         matched_links = self._apply_filters(links, include_patterns)
-                            
+                        extracted_data = list(set(matched_links))
+   
                         send_result_to_laravel({
                             "type": "seed",
                             "original_url": url,
                             "final_url": page.url,
-                            "content": matched_links,
+                            "content": extracted_data,
                             "meta": meta,
                             "is_last": index == len(urls) - 1,
                             "status_code": 200

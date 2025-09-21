@@ -6,13 +6,12 @@ from services.base_crawler import BaseCrawler
 from utils.sender import send_result_to_laravel
 from config import DEBUG_MODE
 
-# List of realistic User-Agents (update periodically)
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:130.0) Gecko/20100101 Firefox/130.0",
 ]
-# List of languages for diversity
+
 LANGUAGES = ["en-US,en", "en-GB,en", "fa-IR,fa"]
 
 class StaticCrawler(BaseCrawler):
@@ -110,8 +109,7 @@ class StaticCrawler(BaseCrawler):
                             if any(indicator in title for indicator in ["Access Denied", "Challenge"]) or "turnstile" in content.lower():
                                 raise Exception("Possible bot detection block")
                             
-                            if any(missing in title for missing in 
-                                   ["Not Found", "404" , "Not Exists" , 'پیدا نشد' , 'یافت نشد']):
+                            if any(missing in title for missing in ["Not Found", "Not Exists"]):
                                 send_result_to_laravel({
                                 "type": "static",
                                 "original_url": url,
