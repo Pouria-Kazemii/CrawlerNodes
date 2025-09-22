@@ -67,8 +67,7 @@ class StaticCrawler(BaseCrawler):
                 ]
 
                 browser = await p.chromium.launch(
-                    headless=not DEBUG_MODE,
-                    slow_mo=200 if DEBUG_MODE else 0,
+                    headless=True,
                     args=browser_args,
                 )
 
