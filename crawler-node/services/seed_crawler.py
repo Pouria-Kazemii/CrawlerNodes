@@ -1,5 +1,5 @@
 import asyncio
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright , TimeoutError as PlaywrightTimeoutError
 from services.base_crawler import BaseCrawler
 from utils.sender import send_result_to_laravel
 from config import DEBUG_MODE
@@ -63,62 +63,88 @@ class SeedCrawler(BaseCrawler):
                 )
                 
                 context = await browser.new_context(extra_http_headers=headers)
-                # Set longer timeouts for Docker environment
                 context.set_default_timeout(30000)
                 page = await context.new_page()
                 page.set_default_timeout(30000)
 
                 for index, url in enumerate(urls):
-                    try:
-                        # Enhanced navigation with better error handling
+                    for attempt in range(3 + 1):
                         try:
-                            await page.goto(url, timeout=15000, wait_until='domcontentloaded')
-                            await page.wait_for_load_state("networkidle", timeout=10000)
-                            await asyncio.sleep(delay)
-                        except Exception as nav_error:
+                            response = await page.goto(url, timeout=15000, wait_until='domcontentloaded')
+                            status_code = response.status if response else 500
+                            
+                            if status_code >= 400:
+                                send_result_to_laravel({
+                                    "type": "seed",
+                                    "original_url": url,
+                                    "error": f"HTTP {status_code} received",
+                                    "meta": meta,
+                                    "is_last": index == len(urls) - 1,
+                                    "status_code": status_code
+                                })
+                                break
+                                
+                            content_loaded = False
+                            
+                            try:
+                                await page.wait_for_selector(selector, timeout=15000)
+                                content_loaded = True
+                            except PlaywrightTimeoutError:
+                                if DEBUG_MODE:
+                                    print(f"Timeout waiting for selector {selector} on {url}")
+                                    
+                            if not content_loaded and attempt < 3:
+                                if DEBUG_MODE:
+                                    print(f"Retrying {url} (attempt {attempt + 1}/{3})")
+                                await asyncio.sleep(1)  # Brief pause before retry
+                                continue        
+                                    
+                            if selector and selector != 'null':
+                                links = await page.eval_on_selector_all(
+                                    f"{selector} a[href]",
+                                    "elements => elements.map(e => e.href)" 
+                                )
+                            else:
+                                links = await page.eval_on_selector_all(
+                                    "a[href]",
+                                    "elements => elements.map(e => e.href)"
+                                )    
+                            
+                            matched_links = self._apply_filters(links, include_patterns)
+                            extracted_data = list(set(matched_links))
+                                
+                            if not extracted_data and content_loaded and attempt < 3:
+                                if DEBUG_MODE:
+                                    print(f"No links found on {url}, retrying (attempt {attempt + 1}/{3})")
+                                await asyncio.sleep(1)
+                                continue
+                                
                             send_result_to_laravel({
                                 "type": "seed",
                                 "original_url": url,
-                                "error": f"Navigation failed: {str(nav_error)}",
+                                "final_url": page.url,
+                                "content": extracted_data,
                                 "meta": meta,
                                 "is_last": index == len(urls) - 1,
-                                "status_code": 500
+                                "status_code": 200
                             })
-                            continue  # Continue with next URL
-                        
-                        if selector and selector != 'null':
-                            links = await page.eval_on_selector_all(
-                                f"{selector} a[href]",
-                                "elements => elements.map(e => e.href)"
-                            )
-                        else:
-                            links = await page.eval_on_selector_all(
-                                "a[href]",
-                                "elements => elements.map(e => e.href)"
-                            )    
-                            
-                        matched_links = self._apply_filters(links, include_patterns)
-                        extracted_data = list(set(matched_links))
+                            break
    
-                        send_result_to_laravel({
-                            "type": "seed",
-                            "original_url": url,
-                            "final_url": page.url,
-                            "content": extracted_data,
-                            "meta": meta,
-                            "is_last": index == len(urls) - 1,
-                            "status_code": 200
-                        })
+                        except Exception as e:
+                            if attempt == 3:
+                                send_result_to_laravel({
+                                    "type": "seed",
+                                    "original_url": url,
+                                    "error": f"Failed after {3} retries: {str(e)}",
+                                    "meta": meta,
+                                    "is_last": index == len(urls) - 1,
+                                    "status_code": 500
+                                })
+                            if DEBUG_MODE:
+                                print(f"Error on {url}: {str(e)}")
+                            await asyncio.sleep(1)  # Pause before retry
 
-                    except Exception as e:
-                        send_result_to_laravel({
-                            "type": "seed",
-                            "original_url": url,
-                            "error": str(e),
-                            "meta": meta,
-                            "is_last": index == len(urls) - 1,
-                            "status_code": 500
-                        })
+                    await asyncio.sleep(delay)  # Delay between URLs
 
                 await browser.close()
 
@@ -132,6 +158,7 @@ class SeedCrawler(BaseCrawler):
                 "status_code": 500
             })
             return {"status": "error", "message": str(e)}
+
 
     def _apply_filters(self, links, include_substrings):
         if not include_substrings:
