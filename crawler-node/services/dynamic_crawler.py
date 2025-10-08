@@ -24,7 +24,7 @@ class DynamicCrawler(BaseCrawler):
             meta = config.get("meta")
             if not urls or not isinstance(urls, list):
                 send_result_to_laravel({
-                    "type": "static",
+                    "type": "dynamic",
                     "original_url": urls,
                     "error": 'Missing or invalid urls (must be an array)',
                     "meta": meta,
@@ -35,7 +35,7 @@ class DynamicCrawler(BaseCrawler):
 
             if not meta or not isinstance(meta, dict):
                 send_result_to_laravel({
-                    "type": "static",
+                    "type": "dynamic",
                     "original_url": urls,
                     "error": 'Missing or invalid meta (must be an object)',
                     "meta": meta,
@@ -108,7 +108,7 @@ class DynamicCrawler(BaseCrawler):
 
                             if any(missing in title for missing in ["Not Found" , "Not Exists"]):
                                 send_result_to_laravel({
-                                "type": "static",
+                                "type": "dynamic",
                                 "original_url": url,
                                 "final_url": page.url,
                                 "content": 'Page Not Exists',
@@ -173,10 +173,11 @@ class DynamicCrawler(BaseCrawler):
                                 extracted_data = list(set(data))
                                         
                                 send_result_to_laravel({
-                                "type": "static",
+                                "type": "dynamic",
                                 "original_url": url,
                                 "final_url": page.url,
                                 "content": extracted_data,
+                                "first_step": True,
                                 "meta": meta,
                                 "is_last": index == len(urls) - 1,
                                 'status_code': 200
@@ -271,7 +272,7 @@ class DynamicCrawler(BaseCrawler):
                                             extracted_data[field] = []
                                         
                                 send_result_to_laravel({
-                                "type": "static",
+                                "type": "dynamic",
                                 "original_url": url,
                                 "final_url": page.url,
                                 "content": extracted_data,
@@ -306,7 +307,7 @@ class DynamicCrawler(BaseCrawler):
                                 continue
                             else:
                                 send_result_to_laravel({
-                                    "type": "static",
+                                    "type": "dynamic",
                                     "original_url": url,
                                     "error": f"Navigation failed: {str(nav_error)}",
                                     "meta": meta,
